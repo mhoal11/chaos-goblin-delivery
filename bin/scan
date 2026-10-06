@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+
+# ============================================================
+# Chaos Goblin Delivery System
+# scan: document scanner -> searchable PDF -> optional delivery
+#
+# Usage:
+#   scan            single-sided
+#   scan double     double-sided (duplex)
+#
+# 600 DPI / US Letter / OCR / PDF/A
+# Tested with an Epson ES-400II (SANE epsonds backend).
+# ============================================================
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/chaos-goblin/chaos-goblin.conf"
+[[ -f "$CONFIG" ]] && source "$CONFIG"
+
+DEFAULT_RECIPIENT="${DEFAULT_RECIPIENT:-desktop}"
+OUTDIR="${SCAN_DIR:-$HOME/Documents/Scans}"
+
+# Auto-detect an Epson scanner on USB unless one is configured.
+if [[ -z "${SCANNER:-}" ]]; then
+    USBDEV="$(lsusb | awk 'tolower($0) ~ /epson/ {gsub(":", "", $4); print $2 ":" $4; exit}')"
+    SCANNER="${USBDEV:+epsonds:libusb:$USBDEV}"
+fi
+
+if [[ -z "$SCANNER" ]]; then
+    echo "ERROR: No scanner found. Set SCANNER in $CONFIG (see: scanimage -L)."
+    exit 1
+fi
+
+WORKDIR=$(mktemp -d)
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+OUTPUT="$OUTDIR/$TIMESTAMP.pdf"
+
+mkdir -p "$OUTDIR"
+
+cleanup() {
+    rm -rf "$WORKDIR"
+}
+trap cleanup EXIT
+
+if [[ "${1:-}" == "double" ]]; then
+    SOURCE="ADF Duplex"
+    MODE="double-sided"
+else
+    SOURCE="ADF Front"
+    MODE="single-sided"
+fi
+
+echo "========================================"
+echo " Chaos Goblin Scanner"
+echo "========================================"
+echo " Mode:       $MODE"
+echo " Resolution: 600 DPI"
+echo " Paper:      US Letter"
+echo " OCR:        Enabled"
+echo " Output:     $OUTPUT"
+echo "----------------------------------------"
+echo " Place documents in the ADF..."
+echo ""
+
+if ! scanimage \
+    -d "$SCANNER" \
+    --source "$SOURCE" \
+    --resolution 600 \
+    -l 0 -t 0 -x 215.9 -y 279.4 \
+    --format=pnm \
+    --batch="$WORKDIR/page-%03d.pnm"
+then
+    echo ""
+    echo "Scanner encountered an error."
+    exit 1
+fi
+
+PAGE_COUNT=$(find "$WORKDIR" -name 'page-*.pnm' | wc -l)
+
+if [[ "$PAGE_COUNT" -eq 0 ]]; then
+    echo ""
+    echo "No pages were scanned."
+    exit 1
+fi
+
+echo ""
+echo "$PAGE_COUNT page(s) scanned."
+echo "Creating PDF..."
+
+if ! img2pdf "$WORKDIR"/page-*.pnm -o "$WORKDIR/raw.pdf"; then
+    echo ""
+    echo "PDF creation failed."
+    exit 1
+fi
+
+echo "Applying OCR..."
+
+if ! ocrmypdf --output-type pdfa "$WORKDIR/raw.pdf" "$OUTPUT"; then
+    echo ""
+    echo "OCR processing failed."
+    exit 1
+fi
+
+echo ""
+echo "========================================"
+echo " OCR COMPLETE"
+echo "========================================"
+echo "Saved locally:"
+echo "$OUTPUT"
+echo ""
+
+read -r -p "Send this scan to '$DEFAULT_RECIPIENT'? [y/N]: " SEND
+
+if [[ "$SEND" =~ ^[Yy]$ ]]; then
+    send-to "$DEFAULT_RECIPIENT" "$OUTPUT"
+else
+    echo ""
+    echo "Not sent."
+fi
+
+echo "✓ Local copy retained:"
+echo "$OUTPUT"
+echo ""

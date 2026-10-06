@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+
+# ============================================================
+# Chaos Goblin Delivery System
+# ocr: existing PDF -> searchable PDF -> descriptive filename
+#      -> optional delivery
+#
+# Usage:
+#   ocr <PDF file>
+#
+# Output is named "<file date> - <Detected Title>.pdf",
+# with characters Windows does not allow replaced.
+# ============================================================
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/chaos-goblin/chaos-goblin.conf"
+[[ -f "$CONFIG" ]] && source "$CONFIG"
+
+DEFAULT_RECIPIENT="${DEFAULT_RECIPIENT:-desktop}"
+DETECT="${CHAOS_GOBLIN_LIB:-$HOME/.local/lib/chaos-goblin}/detect-pdf-title"
+
+input="${1:-}"
+
+if [ -z "$input" ]; then
+    echo "Usage: ocr <PDF file>"
+    exit 1
+fi
+
+if [ ! -f "$input" ]; then
+    echo "File not found: $input"
+    exit 1
+fi
+
+dir="$(dirname "$input")"
+base="$(basename "$input")"
+base="${base%.*}"
+
+output="$dir/${base}_OCR.pdf"
+
+echo
+echo "Running OCR..."
+echo "Input:  $input"
+echo "Output: $output"
+echo
+
+if ! ocrmypdf \
+    --rotate-pages \
+    --deskew \
+    --clean \
+    --skip-text \
+    "$input" "$output"
+then
+    echo
+    echo "OCR failed. File was not sent."
+    exit 1
+fi
+
+# --------------------------------------------------------
+# Detect a useful title from page 1
+# --------------------------------------------------------
+
+detected="$("$DETECT" "$output" 2>/dev/null)"
+
+if [ -n "$detected" ]; then
+
+    echo
+    echo "Detected title:"
+    echo "  $detected"
+    echo
+
+    read -r -p "Press Enter to accept, or type a replacement title: " custom_title
+
+    if [ -n "$custom_title" ]; then
+        detected="$custom_title"
+    fi
+
+    # Remove characters Windows does not permit in filenames.
+    safe_title="$(
+        printf '%s' "$detected" |
+        tr '\r\n' '  ' |
+        sed -E \
+            's#[\\/:*?"<>|]#-#g;
+             s/[[:space:]]+/ /g;
+             s/^ +//;
+             s/ +$//'
+    )"
+
+    # We only need enough title to identify the document.
+    safe_title="${safe_title:0:90}"
+
+    # Use the source file timestamp for chronology.
+    stamp="$(
+        date -r "$input" '+%Y-%m-%d_%H-%M-%S' 2>/dev/null ||
+        date '+%Y-%m-%d_%H-%M-%S'
+    )"
+
+    final="$dir/${stamp} - ${safe_title}.pdf"
+
+    # Avoid overwriting an existing file.
+    if [ -e "$final" ]; then
+        final="$dir/${stamp} - ${safe_title} - $$.pdf"
+    fi
+
+    mv -- "$output" "$final"
+    output="$final"
+
+    echo
+    echo "Renamed OCR file:"
+    echo "  $(basename "$output")"
+else
+    echo
+    echo "No reliable title detected."
+    echo "Keeping original OCR filename."
+fi
+
+echo
+echo "========================================"
+echo " OCR COMPLETE"
+echo " $output"
+echo "========================================"
+echo
+
+read -r -p "Send OCR'd PDF to '$DEFAULT_RECIPIENT'? [y/N]: " answer
+
+case "$answer" in
+    [Yy]|[Yy][Ee][Ss])
+        send-to "$DEFAULT_RECIPIENT" "$output"
+        ;;
+    *)
+        echo "File kept locally."
+        ;;
+esac

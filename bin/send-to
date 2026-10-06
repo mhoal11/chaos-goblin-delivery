@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+
+set -u
+set -o pipefail
+
+# ============================================================
+# Chaos Goblin Delivery System
+# Shared File Transfer Engine
+#
+# Usage:
+#   send-to RECIPIENT [FILE ...]
+#
+# With no files, a graphical file picker opens.
+# Recipients are profiles in:
+#   ~/.config/chaos-goblin/recipients/RECIPIENT.conf
+#   /etc/chaos-goblin/recipients/RECIPIENT.conf
+# ============================================================
+
+
+error_exit() {
+    echo
+    echo "ERROR: $*" >&2
+    echo
+    exit 1
+}
+
+
+# ------------------------------------------------------------
+# Load recipient
+# ------------------------------------------------------------
+
+if [[ $# -lt 1 ]]; then
+    error_exit "No recipient specified."
+fi
+
+RECIPIENT="$1"
+shift
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/chaos-goblin"
+PROFILE=""
+
+for CANDIDATE in \
+    "$CONFIG_DIR/recipients/${RECIPIENT}.conf" \
+    "/etc/chaos-goblin/recipients/${RECIPIENT}.conf"
+do
+    if [[ -f "$CANDIDATE" ]]; then
+        PROFILE="$CANDIDATE"
+        break
+    fi
+done
+
+if [[ -z "$PROFILE" ]]; then
+    error_exit "Recipient profile not found: ${RECIPIENT}.conf (looked in $CONFIG_DIR/recipients and /etc/chaos-goblin/recipients)"
+fi
+
+# Load recipient configuration
+source "$PROFILE"
+
+
+# ------------------------------------------------------------
+# Validate recipient configuration
+# ------------------------------------------------------------
+
+[[ -n "${DISPLAY_NAME:-}" ]] ||
+    error_exit "DISPLAY_NAME missing from recipient profile."
+
+[[ -n "${SMB_HOST:-}" ]] ||
+    error_exit "SMB_HOST missing from recipient profile."
+
+[[ -n "${SMB_SHARE:-}" ]] ||
+    error_exit "SMB_SHARE missing from recipient profile."
+
+[[ -n "${CREDENTIALS:-}" ]] ||
+    error_exit "CREDENTIALS missing from recipient profile."
+
+[[ -f "$CREDENTIALS" ]] ||
+    error_exit "Credentials file not found: $CREDENTIALS"
+
+command -v smbclient >/dev/null 2>&1 ||
+    error_exit "smbclient is not installed."
+
+
+# ------------------------------------------------------------
+# Select files
+#
+# Files supplied on command line:
+#   send-to desktop file.pdf picture.jpg
+#
+# No files supplied:
+#   send-to desktop
+#   -> graphical file picker
+# ------------------------------------------------------------
+
+FILES=()
+PICKER_MODE=false
+
+if [[ $# -gt 0 ]]; then
+
+    for FILE in "$@"; do
+        FILES+=("$FILE")
+    done
+
+else
+
+    PICKER_MODE=true
+
+    command -v zenity >/dev/null 2>&1 ||
+        error_exit "zenity is not installed."
+
+    SELECTION="$(
+        zenity \
+            --file-selection \
+            --multiple \
+            --separator=$'\n' \
+            --title="Send files to ${DISPLAY_NAME}"
+    )"
+
+    RESULT=$?
+
+    # User clicked Cancel
+    if [[ $RESULT -ne 0 || -z "$SELECTION" ]]; then
+        exit 0
+    fi
+
+    while IFS= read -r FILE; do
+        [[ -n "$FILE" ]] && FILES+=("$FILE")
+    done <<< "$SELECTION"
+
+fi
+
+
+# ------------------------------------------------------------
+# Nothing selected
+# ------------------------------------------------------------
+
+if [[ ${#FILES[@]} -eq 0 ]]; then
+    exit 0
+fi
+
+
+# ------------------------------------------------------------
+# Escape values for smbclient command parser
+# ------------------------------------------------------------
+
+smb_escape() {
+
+    local VALUE="$1"
+
+    VALUE="${VALUE//\\/\\\\}"
+    VALUE="${VALUE//\"/\\\"}"
+
+    printf '%s' "$VALUE"
+}
+
+
+# ------------------------------------------------------------
+# Delivery
+# ------------------------------------------------------------
+
+SUCCESS=0
+FAILED=0
+
+echo
+echo "=============================================="
+echo "       CHAOS GOBLIN DELIVERY SYSTEM"
+echo "=============================================="
+echo "Recipient: $DISPLAY_NAME"
+echo "Destination: //$SMB_HOST/$SMB_SHARE"
+echo "Files selected: ${#FILES[@]}"
+echo "=============================================="
+echo
+
+
+for FILE in "${FILES[@]}"; do
+
+    if [[ ! -f "$FILE" ]]; then
+
+        echo "SKIPPED:"
+        echo "  $FILE"
+        echo "  Reason: not a regular file."
+        echo
+
+        FAILED=$((FAILED + 1))
+        continue
+    fi
+
+
+    FULLPATH="$(realpath "$FILE")"
+    LOCALDIR="$(dirname "$FULLPATH")"
+    FILENAME="$(basename "$FULLPATH")"
+
+    SAFE_DIR="$(smb_escape "$LOCALDIR")"
+    SAFE_FILE="$(smb_escape "$FILENAME")"
+
+
+    echo "Delivering:"
+    echo "  $FILENAME"
+
+
+    SMB_COMMAND="lcd \"$SAFE_DIR\"; put \"$SAFE_FILE\" \"$SAFE_FILE\""
+
+
+    if smbclient \
+        "//$SMB_HOST/$SMB_SHARE" \
+        -A "$CREDENTIALS" \
+        -c "$SMB_COMMAND"
+    then
+
+        echo "DELIVERED:"
+        echo "  $FILENAME"
+        echo
+
+        SUCCESS=$((SUCCESS + 1))
+
+    else
+
+        echo "FAILED:"
+        echo "  $FILENAME"
+        echo
+
+        FAILED=$((FAILED + 1))
+    fi
+
+done
+
+
+# ------------------------------------------------------------
+# Summary
+# ------------------------------------------------------------
+
+echo "=============================================="
+echo "DELIVERY SUMMARY"
+echo "Delivered: $SUCCESS"
+echo "Failed:    $FAILED"
+echo "=============================================="
+echo
+
+
+# Optional desktop notification
+
+if command -v notify-send >/dev/null 2>&1; then
+
+    if [[ $FAILED -eq 0 ]]; then
+
+        if [[ $SUCCESS -eq 1 ]]; then
+
+            notify-send \
+                "Chaos Goblin Delivery" \
+                "File delivered to ${DISPLAY_NAME}."
+
+        else
+
+            notify-send \
+                "Chaos Goblin Delivery" \
+                "${SUCCESS} files delivered to ${DISPLAY_NAME}."
+
+        fi
+
+    else
+
+        notify-send \
+            "Chaos Goblin Delivery" \
+            "${SUCCESS} delivered; ${FAILED} failed."
+
+    fi
+fi
+
+
+if [[ $FAILED -gt 0 ]]; then
+    exit 1
+fi
+
+exit 0

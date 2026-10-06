@@ -1,0 +1,6 @@
+# Never commit real credentials or recipient profiles
+.smbcredentials
+*.smbcredentials
+smbcredentials
+config/recipients/*.conf
+!config/recipients/example.conf
