@@ -1,4 +1,8 @@
-# Chaos Goblin Delivery System
+<p align="center">
+  <img src="docs/logo.png" alt="Chaos Goblin Delivery System logo: a goblin passing a folder and a document between two arrows" width="180">
+</p>
+
+<h1 align="center">Chaos Goblin Delivery System</h1>
 
 **Scan it, read it, name it, ship it.** A small set of Linux command-line tools that turn paper (or an existing PDF) into a searchable, sensibly named PDF and drop it straight into a shared folder on a Windows PC, in one command.
 
